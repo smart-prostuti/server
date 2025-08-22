@@ -1,44 +1,12 @@
-// Server/index.js (এই ফাইলটি আপনার Server GitHub রিপোজিটরির রুটে থাকবে)
+// ... keep everything above unchanged
 
-require('dotenv').config(); // লোকাল ডেভেলপমেন্টের জন্য
-const express = require('express');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const cors = require('cors');
-
-const app = express();
-const port = process.env.PORT || 3001; // লোকাল ডেভেলপমেন্টের জন্য
-
-// CORS মিডলওয়্যার সেটআপ
-// এখানে আপনার Netlify ফ্রন্টএন্ডের URL টি যোগ করতে হবে
-// এবং Render থেকে deploy হওয়া ব্যাকএন্ডের URL (যদি আপনি নিজে deploy করেন)
-app.use(cors({
-  origin: [
-    'http://localhost:5173', // লোকাল ডেভেলপমেন্টের জন্য
-    'https://toolsgovt.netlify.app', // <-- আপনার Netlify ফ্রন্টএন্ড URL
-  ]
-}));
-app.use(express.json());
-
-// API Key এনভায়রনমেন্ট ভেরিয়েবল থেকে পাবে (লোকালে .env থেকে, Render-এ Render এর কনফিগারেশন থেকে)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-  console.error("Error: GEMINI_API_KEY is not set in environment variables.");
-  // প্রোডাকশন এনভায়রনমেন্টে API Key না থাকলে সার্ভার ত্রুটি দেবে বা বন্ধ হবে
-  process.exit(1);
-}
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-// একমাত্র এন্ডপয়েন্ট: পরীক্ষার ডেটা বিশ্লেষণ এবং ফিডব্যাক তৈরির জন্য
 app.post('/api/analyze-answers', async (req, res) => {
-  const { subject, chapter, totalQuestions, answeredQuestions, wrongAnswers } = req.body;
+  const { subject, chapter, totalQuestions, answeredQuestions, wrongAnswers = [] } = req.body;
 
-  // ইনপুট ভ্যালিডেশন
   if (!subject || !chapter || totalQuestions === undefined || answeredQuestions === undefined) {
     return res.status(400).json({ error: 'Subject, chapter, total questions, and answered questions are required.' });
   }
 
-  // প্রম্পট তৈরি করা হচ্ছে
   const wrongAnswersText = wrongAnswers.map((item, index) => {
     return `
       ${index + 1}. প্রশ্ন: ${item.questionText}
@@ -64,38 +32,61 @@ app.post('/api/analyze-answers', async (req, res) => {
 
     {
       "summary": "এই পরীক্ষার সংক্ষিপ্ত সারসংক্ষেপ",
-      "weaknesses": [
-        "দুর্বলতার ক্ষেত্র ১ (যেমন: এই অধ্যায়ের কোন বিষয়গুলো বোঝা প্রয়োজন)",
-        "দুর্বলতার ক্ষেত্র ২",
-        "..."
-      ],
-      "suggestions": [
-        "পরামর্শ ১ (যেমন: ভুলগুলো থেকে শিখতে কী করা উচিত)",
-        "পরামর্শ ২",
-        "..."
-      ],
+      "weaknesses": [],
+      "suggestions": [],
       "encouragement": "শিক্ষার্থীকে উৎসাহিত করার জন্য একটি ছোট বার্তা"
     }
-    
+
     যদি কোনো ভুল উত্তর না থাকে, তবে weaknesses, suggestions অ্যারে গুলোকে খালি রাখবেন।
   `;
 
+  // --- helper to robustly parse JSON, even if fenced ---
+  function parseModelJson(text) {
+    // Try direct parse first
+    try { return JSON.parse(text); } catch {}
+
+    // Strip ```json ... ``` or ``` ... ```
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const raw = fenced ? fenced[1] : text;
+
+    // Take substring between first { and last }
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      const sliced = raw.slice(start, end + 1);
+      return JSON.parse(sliced);
+    }
+    throw new Error("Model output was not valid JSON");
+  }
+
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
 
-    const analysis = JSON.parse(text.trim());
-    res.json({ analysis });
+    // Ask for pure JSON
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }]}],
+      generationConfig: { responseMimeType: "application/json" }
+    });
 
+    const text = result.response.text();
+
+    let analysis;
+    try {
+      analysis = parseModelJson(text.trim());
+    } catch (parseErr) {
+      console.error("Parse failed. Raw model output:", text);
+      throw parseErr;
+    }
+
+    // Optional: minimal schema hardening
+    analysis.summary ??= "";
+    analysis.weaknesses = Array.isArray(analysis.weaknesses) ? analysis.weaknesses : [];
+    analysis.suggestions = Array.isArray(analysis.suggestions) ? analysis.suggestions : [];
+    analysis.encouragement ??= "";
+
+    return res.json({ analysis });
   } catch (error) {
-    console.error('Error calling Gemini API for analysis:', error.message);
-    res.status(500).json({ error: `বিশ্লেষণ তৈরি করতে সমস্যা হয়েছে: ${error.message}` });
+    console.error('Error calling Gemini API for analysis:', error);
+    return res.status(500).json({ error: `বিশ্লেষণ তৈরি করতে সমস্যা হয়েছে: ${error.message}` });
   }
-});
-
-// লোকাল ডেভেলপমেন্টের জন্য সার্ভার চালু করে
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
 });
