@@ -24,76 +24,74 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
   console.error("Error: GEMINI_API_KEY is not set in environment variables.");
   // প্রোডাকশন এনভায়রনমেন্টে API Key না থাকলে সার্ভার ত্রুটি দেবে বা বন্ধ হবে
-  process.exit(1); // এই লাইনটি প্রোডাকশনের জন্য ভালো, লোকাল ডেভের জন্য কমেন্ট করে রাখতে পারেন
+  process.exit(1);
 }
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-app.post('/api/generate-application', async (req, res) => {
-  // ফ্রন্টএন্ড থেকে পাঠানো ডেটা রিসিভ করা হচ্ছে
-  const { governmentOfficeName, applicantName, topic, additionalPrompt } = req.body;
+// একমাত্র এন্ডপয়েন্ট: পরীক্ষার ডেটা বিশ্লেষণ এবং ফিডব্যাক তৈরির জন্য
+app.post('/api/analyze-answers', async (req, res) => {
+  const { subject, chapter, totalQuestions, answeredQuestions, wrongAnswers } = req.body;
 
   // ইনপুট ভ্যালিডেশন
-  if (!governmentOfficeName || !applicantName || !topic) {
-    console.log('Validation failed: Missing required fields in request body.', req.body);
-    return res.status(400).json({ error: 'সরকারি অফিসের নাম, আপনার নাম এবং বিষয় উল্লেখ করা আবশ্যক।' });
+  if (!subject || !chapter || totalQuestions === undefined || answeredQuestions === undefined) {
+    return res.status(400).json({ error: 'Subject, chapter, total questions, and answered questions are required.' });
   }
+
+  // প্রম্পট তৈরি করা হচ্ছে
+  const wrongAnswersText = wrongAnswers.map((item, index) => {
+    return `
+      ${index + 1}. প্রশ্ন: ${item.questionText}
+      আপনার উত্তর: ${item.selectedIndex !== null ? item.options[item.selectedIndex].text : 'উত্তর দেননি'}
+      সঠিক উত্তর: ${item.options[item.correctIndex].text}
+      সঠিক উত্তরের ব্যাখ্যা: ${item.explanation || 'কোন ব্যাখ্যা নেই।'}`;
+  }).join('\n\n');
+
+  const prompt = `
+    আপনি একজন অভিজ্ঞ শিক্ষক। আপনার কাজ হলো একজন শিক্ষার্থীর পরীক্ষার ফলাফলের উপর ভিত্তি করে একটি বিস্তারিত বিশ্লেষণ ও পরামর্শ তৈরি করা।
+
+    পরীক্ষার বিষয়: ${subject}
+    অধ্যায়: ${chapter}
+    মোট প্রশ্ন: ${totalQuestions}
+    উত্তর দেওয়া প্রশ্ন: ${answeredQuestions}
+    ভুল উত্তর বা উত্তর না দেওয়া প্রশ্ন: ${wrongAnswers.length}
+
+    এখানে সেই প্রশ্নগুলো এবং তাদের সঠিক উত্তরের সাথে শিক্ষার্থীর উত্তর দেওয়া হলো, যেগুলোতে সে ভুল করেছে অথবা উত্তর দেয়নি:
+
+    ${wrongAnswers.length > 0 ? wrongAnswersText : 'শিক্ষার্থী সব প্রশ্নের সঠিক উত্তর দিয়েছে।'}
+
+    আপনার বিশ্লেষণটি নিম্নলিখিত কাঠামোতে বাংলায় প্রদান করুন। কোনো অতিরিক্ত কথা লিখবেন না, শুধুমাত্র JSON ফরম্যাটে আউটপুট দিন।
+
+    {
+      "summary": "এই পরীক্ষার সংক্ষিপ্ত সারসংক্ষেপ",
+      "weaknesses": [
+        "দুর্বলতার ক্ষেত্র ১ (যেমন: এই অধ্যায়ের কোন বিষয়গুলো বোঝা প্রয়োজন)",
+        "দুর্বলতার ক্ষেত্র ২",
+        "..."
+      ],
+      "suggestions": [
+        "পরামর্শ ১ (যেমন: ভুলগুলো থেকে শিখতে কী করা উচিত)",
+        "পরামর্শ ২",
+        "..."
+      ],
+      "encouragement": "শিক্ষার্থীকে উৎসাহিত করার জন্য একটি ছোট বার্তা"
+    }
+    
+    যদি কোনো ভুল উত্তর না থাকে, তবে weaknesses, suggestions অ্যারে গুলোকে খালি রাখবেন।
+  `;
 
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
-    // বাংলাদেশ সময় (ঢাকা) অনুযায়ী বর্তমান তারিখ ও সময়
-    const bangladeshTimeZone = 'Asia/Dhaka';
-    const optionsDate = { day: 'numeric', month: 'long', year: 'numeric', timeZone: bangladeshTimeZone };
-    const optionsTime = { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true, timeZone: bangladeshTimeZone };
-    const currentDate = new Date().toLocaleDateString('bn-BD', optionsDate);
-    const currentTime = new Date().toLocaleTimeString('bn-BD', optionsTime);
-
-    // প্রম্পট তৈরি করা হচ্ছে
-    const prompt = `
-      বর্তমান তারিখ ও সময় (বাংলাদেশ): ${currentDate}, ${currentTime}।
-      বাংলায় একটি অফিসিয়াল সরকারি আবেদন পত্র লিখুন।
-
-      আবেদনপত্রের প্রাপক: ${governmentOfficeName}
-      আবেদনকারীর নাম: ${applicantName}
-      আবেদনের বিষয়: ${topic}
-      ${additionalPrompt ? `আবেদনপত্রের বডিতে এই অতিরিক্ত তথ্যগুলো যোগ করুন: "${additionalPrompt}"` : ''}
-
-      আবেদনপত্রের কাঠামো নিম্নরূপ হবে এবং বাংলাদেশের সরকারি অফিসিয়াল আবেদনের রীতি কঠোরভাবে অনুসরণ করবে:
-
-      তারিখ: ${currentDate}
-
-      বরাবর,
-      ${governmentOfficeName}
-      [এখানে অফিসের একটি জেনেরিক ঠিকানা যোগ করুন, যেমন: সিলেট, বাংলাদেশ]
-
-      বিষয়: ${topic}
-
-      জনাব,
-
-      সবিনয় নিবেদন এই যে, [এখানে "${topic}" এর উপর ভিত্তি করে আবেদনপত্রের মূল বডি লিখুন। "${additionalPrompt}" যদি দেওয়া থাকে, তবে সেটি প্রাসঙ্গিকভাবে বডিতে অন্তর্ভুক্ত করুন। আবেদনপত্রের উদ্দেশ্য স্পষ্ট করুন এবং সংক্ষিপ্ত রাখুন। বাংলাদেশের অফিসিয়াল ভাষা ও বিনয় ব্যবহার করুন]।
-
-      অতএব, জনাবের নিকট বিনীত প্রার্থনা এই যে, [এখানে "${topic}" এর উপর ভিত্তি করে সুনির্দিষ্ট অনুরোধটি স্পষ্টভাবে উল্লেখ করুন এবং প্রয়োজনীয় পদক্ষেপের জন্য প্রার্থনা করুন]।
-
-      বিনীত নিবেদক,
-      ${applicantName}
-      [আপনার স্বাক্ষর]
-      [আপনার পদবি, যদি প্রযোজ্য হয়]
-      [আপনার ফোন নম্বর, যদি প্রযোজ্য হয়]
-      [আপনার ইমেইল, যদি প্রযোজ্য হয়]
-
-      অনুগ্রহ করে শুধুমাত্র আবেদন পত্রের সম্পূর্ণ টেক্সট দিন, অন্য কোন অতিরিক্ত কথা নয়। ফরম্যাটটি কঠোরভাবে অনুসরণ করুন।
-    `;
-
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const text = response.text();
 
-    res.json({ applicationText: text });
+    const analysis = JSON.parse(text.trim());
+    res.json({ analysis });
 
   } catch (error) {
-    console.error('Error calling Gemini API:', error.message);
-    res.status(500).json({ error: `অ্যাপ্লিকেশন তৈরি করতে সমস্যা হয়েছে: ${error.message}` });
+    console.error('Error calling Gemini API for analysis:', error.message);
+    res.status(500).json({ error: `বিশ্লেষণ তৈরি করতে সমস্যা হয়েছে: ${error.message}` });
   }
 });
 
