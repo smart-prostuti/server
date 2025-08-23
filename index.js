@@ -20,6 +20,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://toolsgovt.netlify.app',
+    'https://smartprostuti.netlify.app'
   ],
 }));
 
@@ -178,3 +179,4 @@ ${wrongAnswers.length > 0 ? wrongAnswersText : 'শিক্ষার্থী �
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
 });
+
